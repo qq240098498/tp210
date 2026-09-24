@@ -1819,5 +1819,22 @@
         }
       ]
     }
-  ]
+  ],
+  "links": [
+    {
+      "id": "link-0001",
+      "upstreamId": "res-0001",
+      "downstreamId": "res-0002",
+      "lagDays": 1,
+      "ratio": 0.8,
+      "remark": "青岭放水约 1 天后到白河入库，沿途损失按 20% 计"
+    }
+  ],
+  "control": {
+    "maxTotalReleaseFlow": 100,
+    "sectionName": "白河坝下控制断面",
+    "sectionMinFlow": 30,
+    "sectionMaxFlow": 110,
+    "remark": "汛期两库合计出库按总控执行"
+  }
 }

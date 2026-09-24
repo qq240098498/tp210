@@ -6,7 +6,7 @@
 
   /* ================= 常量与工具 ================= */
 
-  var VIEW_IDS = ['overview', 'reservoirs', 'water', 'orders', 'balance'];
+  var VIEW_IDS = ['overview', 'reservoirs', 'water', 'orders', 'balance', 'cascade'];
   var ORDER_STATUSES = ['已下达', '执行中', '已完成', '已撤销'];
   var RESERVOIR_STATUSES = ['运行', '检修'];
 
@@ -128,6 +128,7 @@
     flows: { inflow: [], release: [] },
     orders: [],
     balance: null,
+    cascade: { control: null, links: [], daily: null },
     expanded: { reservoir: '', level: '', flow: '', order: '' },
     reservoirDetail: null,
     curveDraft: null,
@@ -137,7 +138,8 @@
       reservoirs: { basin: '', status: '', keyword: '' },
       water: { reservoirId: '', from: '', to: '' },
       orders: { reservoirId: '', status: '' },
-      balance: { reservoirId: '', from: '2026-05-01', to: '2026-05-10' }
+      balance: { reservoirId: '', from: '2026-05-01', to: '2026-05-10' },
+      cascade: { from: '', to: '' }
     }
   };
 
@@ -245,6 +247,9 @@
         renderOrders();
       } else if (view === 'balance') {
         renderBalance();
+      } else if (view === 'cascade') {
+        await loadCascade();
+        renderCascade();
       }
     } catch (err) {
       showError(err);
@@ -372,6 +377,21 @@
       html.push('<li>每天损失 ' + esc(dash(state.settings ? state.settings.lossPerDayWan : '')) + ' 万m³</li>');
       html.push('<li>容差 ' + esc(dash(state.settings ? state.settings.balanceToleranceWan : '')) + ' 万m³</li>');
       html.push('<li>汛期 ' + esc(dash(state.settings ? state.settings.floodSeasonStart + ' 至 ' + state.settings.floodSeasonEnd : '')) + '</li>');
+      html.push('</ul></div>');
+    } else if (view === 'cascade') {
+      html.push('<div class="side-block">');
+      html.push('<h3>调度窗口</h3>');
+      html.push('<label class="field"><span>起始日期</span><input type="date" data-filter-key="from" data-filter-scope="cascade" value="' + esc(f.from || '') + '" /></label>');
+      html.push('<label class="field"><span>结束日期</span><input type="date" data-filter-key="to" data-filter-scope="cascade" value="' + esc(f.to || '') + '" /></label>');
+      html.push('<button type="button" class="btn btn-ghost btn-sm" data-action="reset-filter" data-scope="cascade">重置筛选</button>');
+      html.push('</div>');
+      html.push('<div class="side-block"><h3>口径</h3><ul class="side-list">');
+      html.push('<li>传递量 = 上游出库 × 传递比例，滞后 N 天到下游入库</li>');
+      html.push('<li>合计出库 = 联合调度组当日各库出库之和</li>');
+      html.push('<li>余量 = 总出库上限 − 当日合计出库</li>');
+      html.push('<li>超上限的出库登记会被拦下并点名</li>');
+      html.push('<li>断面下限只在页面标注，不拦登记</li>');
+      html.push('<li>数字全部取接口字段</li>');
       html.push('</ul></div>');
     }
 
@@ -827,6 +847,212 @@
       + '</ul>';
   }
 
+  /* ================= 联合调度 ================= */
+
+  async function loadCascade() {
+    var f = state.filters.cascade;
+    var control = await api('GET', '/api/cascade/control');
+    var links = await api('GET', '/api/cascade/links');
+    var daily = await api('GET', '/api/cascade/daily' + queryString({ from: f.from, to: f.to }));
+    state.cascade = { control: control, links: links, daily: daily };
+  }
+
+  function sectionTag(sectionState) {
+    var cls = 'tag';
+    if (sectionState === '正常') cls = 'tag is-ok';
+    else if (sectionState === '高于断面上限') cls = 'tag is-over';
+    else if (sectionState === '低于断面下限') cls = 'tag is-warn';
+    return '<span class="' + cls + '">' + esc(dash(sectionState)) + '</span>';
+  }
+
+  function renderCascade() {
+    var c = state.cascade || {};
+    var daily = c.daily;
+    var control = c.control || {};
+    var links = c.links || [];
+
+    /* 指标卡：当前合计、上限、余量、窗口合计水量、超限天数 */
+    var cardsBox = el('cascadeCards');
+    if (!daily) {
+      cardsBox.innerHTML = '<p class="empty">指标还在加载…</p>';
+    } else {
+      var cur = daily.current || {};
+      cardsBox.innerHTML = [
+        metricCard('当前合计出库（m³/s）', numText(cur.totalRelease), '日期 ' + dash(cur.date) + '，接口 current', 'cascade', ''),
+        metricCard('总出库上限（m³/s）', cur.maxTotalReleaseFlow === null ? '未设' : numText(cur.maxTotalReleaseFlow), '两库合计，接口 control', 'cascade', ''),
+        metricCard('当前余量（m³/s）', cur.margin === null ? '—' : numText(cur.margin), '上限 − 当前合计出库', 'cascade', '', cur.margin !== null && cur.margin <= 0),
+        metricCard('窗口合计出库水量（万m³）', numText(daily.summary.totalReleaseWan), daily.from + ' 至 ' + daily.to, 'cascade', ''),
+        metricCard('超限/不达标天数', numText(daily.summary.violationDays), '窗口内违反总控约束的天数', 'cascade', '', daily.summary.violationDays > 0)
+      ].join('');
+    }
+
+    /* 当前合计出库与余量写清楚 */
+    var curBox = el('cascadeCurrent');
+    if (!daily || !daily.current) {
+      curBox.innerHTML = '<p class="empty">数据还在加载…</p>';
+    } else {
+      var now = daily.current;
+      var ctrl = daily.control;
+      var limitPart = ctrl.maxTotalReleaseFlow === null
+        ? '尚未设定两库合计总出库上限'
+        : '总出库上限 <b>' + esc(numText(ctrl.maxTotalReleaseFlow)) + '</b> m³/s';
+      var marginPart = now.margin === null ? '' : '，离上限还有 <b>' + esc(numText(now.margin)) + '</b> m³/s 余量';
+      var sectionPart;
+      if (ctrl.sectionMinFlow === null && ctrl.sectionMaxFlow === null) {
+        sectionPart = '下游控制断面未设要求';
+      } else {
+        var lo = ctrl.sectionMinFlow === null ? '不限' : numText(ctrl.sectionMinFlow);
+        var hi = ctrl.sectionMaxFlow === null ? '不限' : numText(ctrl.sectionMaxFlow);
+        sectionPart = '断面「' + esc(ctrl.sectionName || '下游控制断面') + '」要求 ' + esc(lo) + ' ~ ' + esc(hi) + ' m³/s';
+      }
+      curBox.innerHTML = '<p class="cascade-now">当前（<b>' + esc(now.date) + '</b>）两库合计出库 <b>'
+        + esc(numText(now.totalRelease)) + '</b> m³/s（折合 ' + esc(numText(now.totalReleaseWan)) + ' 万m³/日），'
+        + limitPart + marginPart + '；' + sectionPart + '，断面状态：<b>' + esc(now.sectionState) + '</b>。</p>';
+    }
+
+    /* 总控约束表单回填（null 显示为空） */
+    var controlForm = el('controlForm');
+    [['maxTotalReleaseFlow', control.maxTotalReleaseFlow], ['sectionName', control.sectionName],
+     ['sectionMinFlow', control.sectionMinFlow], ['sectionMaxFlow', control.sectionMaxFlow], ['remark', control.remark]
+    ].forEach(function (pair) {
+      var input = qs('[name="' + pair[0] + '"]', controlForm);
+      if (input) input.value = pair[1] === null || pair[1] === undefined ? '' : pair[1];
+    });
+
+    /* 上下游关系表 */
+    var linkHtml = links.map(function (l) {
+      return '<tr>'
+        + '<td>' + esc(dash(l.upstreamName)) + '</td>'
+        + '<td>' + esc(dash(l.downstreamName)) + '</td>'
+        + '<td class="num">' + esc(numText(l.lagDays)) + '</td>'
+        + '<td class="num">' + esc(numText(l.ratio)) + '</td>'
+        + '<td>' + esc(dash(l.remark)) + '</td>'
+        + '<td><button type="button" class="btn btn-sm" data-action="delete-link" data-id="' + esc(l.id) + '">删除</button></td>'
+        + '</tr>';
+    });
+    el('linkRows').innerHTML = linkHtml.length ? linkHtml.join('') : emptyRow(6, '还没有登记上下游关系，先在上方登记。');
+
+    /* 按日联合调度表：每库一列出库，动态表头 */
+    var reservoirs = daily ? daily.reservoirs : [];
+    el('cascadeDailyHead').innerHTML = '<tr><th>日期</th>'
+      + reservoirs.map(function (r) { return '<th class="num">' + esc(r.name) + '出库</th>'; }).join('')
+      + '<th class="num">合计出库（m³/s）</th><th class="num">合计水量（万m³）</th>'
+      + '<th class="num">上限</th><th class="num">余量</th><th>断面状态</th>'
+      + '<th class="num">传递入下游（m³/s）</th><th>超限说明</th></tr>';
+    var dailyColspan = 8 + reservoirs.length;
+    if (!daily) {
+      el('cascadeDailyRows').innerHTML = emptyRow(dailyColspan, '数据还在加载…');
+    } else {
+      var dayRows = daily.days.slice().reverse().map(function (d) {
+        var cells = reservoirs.map(function (r) {
+          return '<td class="num">' + esc(numText(d.releases[r.id])) + '</td>';
+        }).join('');
+        var note = d.violations.length
+          ? d.violations.map(function (v) { return esc(v.message); }).join('<br/>')
+          : '—';
+        return '<tr' + (d.ok ? '' : ' class="is-invalid"') + '>'
+          + '<td>' + esc(d.date) + '</td>' + cells
+          + '<td class="num">' + esc(numText(d.totalRelease)) + '</td>'
+          + '<td class="num">' + esc(numText(d.totalReleaseWan)) + '</td>'
+          + '<td class="num">' + (d.maxTotalReleaseFlow === null ? '—' : esc(numText(d.maxTotalReleaseFlow))) + '</td>'
+          + '<td class="num">' + (d.margin === null ? '—' : esc(numText(d.margin))) + '</td>'
+          + '<td>' + sectionTag(d.sectionState) + '</td>'
+          + '<td class="num">' + esc(numText(d.transferTotal)) + '</td>'
+          + '<td class="note">' + note + '</td>'
+          + '</tr>';
+      });
+      el('cascadeDailyRows').innerHTML = dayRows.length ? dayRows.join('') : emptyRow(dailyColspan, '窗口内没有日期。');
+      el('cascadeWindowLabel').textContent = daily.from + ' 至 ' + daily.to + '，共 ' + daily.summary.dayCount + ' 天';
+      var fromInput = el('cascadeFrom');
+      if (fromInput) fromInput.value = daily.from;
+      var toInput = el('cascadeTo');
+      if (toInput) toInput.value = daily.to;
+
+      /* 超限明细：逐条点名日期与水库 */
+      var vioBox = el('cascadeViolations');
+      if (daily.summary.violations.length) {
+        vioBox.innerHTML = '<h4>超限明细（逐条点名是哪一天、哪一库造成的）</h4><ul class="caliber">'
+          + daily.summary.violations.map(function (v) { return '<li>' + esc(v.message) + '</li>'; }).join('')
+          + '</ul>';
+      } else {
+        vioBox.innerHTML = '<p class="empty">窗口内没有违反总控约束的日子。</p>';
+      }
+    }
+
+    /* 传递量表：按日给出上游出库到下游入库的传递量 */
+    var transferRows = [];
+    if (daily) {
+      daily.days.slice().reverse().forEach(function (d) {
+        d.transfers.forEach(function (t) {
+          transferRows.push('<tr>'
+            + '<td>' + esc(d.date) + '</td>'
+            + '<td>' + esc(t.upstreamName) + ' → ' + esc(t.downstreamName) + '</td>'
+            + '<td>' + esc(t.sourceDate) + '</td>'
+            + '<td class="num">' + esc(numText(t.upstreamRelease)) + '</td>'
+            + '<td class="num">' + esc(numText(t.ratio)) + '</td>'
+            + '<td class="num">' + esc(numText(t.amount)) + '</td>'
+            + '<td class="num">' + esc(numText(t.amountWan)) + '</td>'
+            + '</tr>');
+        });
+      });
+    }
+    el('cascadeTransferRows').innerHTML = transferRows.length
+      ? transferRows.join('')
+      : emptyRow(7, daily ? '还没有登记上下游关系，算不出传递量。' : '数据还在加载…');
+  }
+
+  async function submitControl(form) {
+    var errorBox = el('controlFormError');
+    clearFormError(errorBox);
+    var values = formValues(form);
+    try {
+      await api('PUT', '/api/cascade/control', {
+        maxTotalReleaseFlow: values.maxTotalReleaseFlow === '' ? '' : Number(values.maxTotalReleaseFlow),
+        sectionName: values.sectionName,
+        sectionMinFlow: values.sectionMinFlow === '' ? '' : Number(values.sectionMinFlow),
+        sectionMaxFlow: values.sectionMaxFlow === '' ? '' : Number(values.sectionMaxFlow),
+        remark: values.remark
+      });
+      toast('总控约束已保存');
+      await reloadView('cascade');
+    } catch (err) {
+      showError(err, errorBox);
+    }
+  }
+
+  async function submitLink(form) {
+    var errorBox = el('linkFormError');
+    clearFormError(errorBox);
+    var values = formValues(form);
+    try {
+      await api('POST', '/api/cascade/links', {
+        upstreamId: values.upstreamId,
+        downstreamId: values.downstreamId,
+        lagDays: Number(values.lagDays),
+        ratio: Number(values.ratio),
+        remark: values.remark
+      });
+      toast('上下游关系已登记');
+      await reloadView('cascade');
+    } catch (err) {
+      showError(err, errorBox);
+    }
+  }
+
+  async function submitCascadeWindow(form) {
+    var errorBox = el('cascadeWindowError');
+    clearFormError(errorBox);
+    var values = formValues(form);
+    state.filters.cascade.from = values.from;
+    state.filters.cascade.to = values.to;
+    try {
+      await reloadView('cascade');
+      renderSidebar();
+    } catch (err) {
+      showError(err, errorBox);
+    }
+  }
+
   /* ================= 设置弹层 ================= */
 
   function openSettingsModal() {
@@ -1093,6 +1319,15 @@
       } catch (err) { showError(err); }
       return;
     }
+    if (action === 'delete-link') {
+      if (!armDelete(btn)) return;
+      try {
+        await api('DELETE', '/api/cascade/links/' + encodeURIComponent(btn.dataset.id));
+        toast('上下游关系已删除');
+        await reloadView('cascade');
+      } catch (err) { showError(err); }
+      return;
+    }
 
     if (action === 'copy-order') {
       try {
@@ -1245,6 +1480,7 @@
       if (scope === 'orders') { reloadView('orders'); return; }
       if (scope === 'water') { reloadView('water').then(updateWaterCounts); return; }
       if (scope === 'balance') { renderBalance(); }
+      if (scope === 'cascade') { reloadView('cascade'); }
     });
 
     document.addEventListener('input', function (event) {
@@ -1269,13 +1505,16 @@
     el('releaseForm').addEventListener('submit', function (event) { event.preventDefault(); submitFlow(event.target, 'release'); });
     el('orderForm').addEventListener('submit', function (event) { event.preventDefault(); submitOrder(event.target); });
     el('balanceForm').addEventListener('submit', function (event) { event.preventDefault(); submitBalance(event.target); });
+    el('controlForm').addEventListener('submit', function (event) { event.preventDefault(); submitControl(event.target); });
+    el('linkForm').addEventListener('submit', function (event) { event.preventDefault(); submitLink(event.target); });
+    el('cascadeWindowForm').addEventListener('submit', function (event) { event.preventDefault(); submitCascadeWindow(event.target); });
   }
 
   /* ================= 下拉与默认值 ================= */
 
   function fillReservoirSelects() {
     var list = state.reservoirs || [];
-    ['levelFormReservoir', 'inflowFormReservoir', 'releaseFormReservoir', 'orderFormReservoir', 'balanceReservoir'].forEach(function (id) {
+    ['levelFormReservoir', 'inflowFormReservoir', 'releaseFormReservoir', 'orderFormReservoir', 'balanceReservoir', 'linkUpstream', 'linkDownstream'].forEach(function (id) {
       var node = el(id);
       if (!node) return;
       var current = node.value;
@@ -1330,6 +1569,7 @@
       state.flows.inflow = await api('GET', '/api/flows?kind=inflow');
       state.flows.release = await api('GET', '/api/flows?kind=release');
       state.orders = await api('GET', '/api/orders');
+      await loadCascade();
     } catch (err) {
       showError(err);
     }
@@ -1342,6 +1582,7 @@
     renderWater();
     renderOrders();
     renderBalance();
+    renderCascade();
   }
 
   if (document.readyState === 'loading') {

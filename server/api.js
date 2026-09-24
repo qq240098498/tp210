@@ -5,6 +5,7 @@ const reservoirs = require('./reservoirs');
 const records = require('./records');
 const water = require('./water');
 const summary = require('./summary');
+const cascade = require('./cascade');
 
 const router = express.Router();
 
@@ -67,6 +68,13 @@ router.get('/balance', withData((data, req) => {
   if (!result) throw new AppError(404, 'BALANCE_UNAVAILABLE', '这个水库还没有水位-库容曲线，算不了');
   return result;
 }));
+
+router.get('/cascade/links', withData((data) => cascade.listLinks(data)));
+router.post('/cascade/links', withData((data, req) => ({ __save: true, __body: cascade.createLink(data, req.body) })));
+router.delete('/cascade/links/:id', withData((data, req) => ({ __save: true, __body: cascade.removeLink(data, req.params.id) })));
+router.get('/cascade/control', withData((data) => cascade.controlOf(data)));
+router.put('/cascade/control', withData((data, req) => ({ __save: true, __body: cascade.saveControl(data, req.body) })));
+router.get('/cascade/daily', withData((data, req) => cascade.daily(data, req.query)));
 
 router.get('/curve/query', withData((data, req) => {
   const { reservoirId, level, capacity } = req.query;

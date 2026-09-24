@@ -401,6 +401,26 @@ code {
 .caliber li { margin-bottom: 4px; }
 .caliber b { color: var(--ink); }
 
+/* ---------- 联合调度 ---------- */
+.cascade-now {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  background: var(--indigo-soft);
+  border: 1px solid #c3cdf0;
+  border-left: 4px solid var(--indigo);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.cascade-now b { color: var(--indigo-deep); }
+.table td.note { font-size: 12px; color: var(--ink-soft); white-space: normal; min-width: 240px; }
+.card h4 {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  color: var(--indigo-deep);
+  border-left: 3px solid var(--indigo);
+  padding-left: 6px;
+}
+
 /* ---------- 弹层 ---------- */
 .modal-mask {
   display: flex;

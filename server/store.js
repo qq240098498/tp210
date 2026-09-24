@@ -16,12 +16,22 @@ const DEFAULT_SETTINGS = {
   inflowSeriousFlow: 260,
 };
 
+// 联合调度总控约束：空值（null）表示这一项不设
+const DEFAULT_CONTROL = {
+  maxTotalReleaseFlow: null,
+  sectionName: '',
+  sectionMinFlow: null,
+  sectionMaxFlow: null,
+  remark: '',
+};
+
 function normalize(raw) {
   const data = raw && typeof raw === 'object' ? raw : {};
   data.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings || {});
-  for (const key of ['reservoirs', 'curves', 'levels', 'inflows', 'releases', 'orders']) {
+  for (const key of ['reservoirs', 'curves', 'levels', 'inflows', 'releases', 'orders', 'links']) {
     if (!Array.isArray(data[key])) data[key] = [];
   }
+  data.control = Object.assign({}, DEFAULT_CONTROL, data.control || {});
   return data;
 }
 
@@ -76,4 +86,13 @@ function daysBetween(from, to) {
   return Math.round((end - start) / 86400000);
 }
 
-module.exports = { load, save, nextId, normalize, todayIso, round, daysBetween, DEFAULT_SETTINGS, dataFile };
+// 日期加减天数，返回 年-月-日
+function addDays(dateStr, n) {
+  const parts = String(dateStr || '').split('-').map(Number);
+  if (parts.length !== 3 || parts.some((p) => !Number.isFinite(p))) return '';
+  const t = Date.UTC(parts[0], parts[1] - 1, parts[2]) + Number(n || 0) * 86400000;
+  const d = new Date(t);
+  return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+}
+
+module.exports = { load, save, nextId, normalize, todayIso, round, daysBetween, addDays, DEFAULT_SETTINGS, DEFAULT_CONTROL, dataFile };
