@@ -10,6 +10,22 @@
     "inflowAttentionFlow": 120,
     "inflowSeriousFlow": 260
   },
+  "jointControl": {
+    "maxTotalReleaseFlow": 150,
+    "sectionName": "白河下游控制断面",
+    "sectionMinFlow": 50,
+    "sectionMaxFlow": 140
+  },
+  "links": [
+    {
+      "id": "link-0001",
+      "upstreamId": "res-0001",
+      "downstreamId": "res-0002",
+      "lagDays": 1,
+      "ratio": 0.8,
+      "remark": "青岭出库经约 1 天传播到白河入库，传递比例 80%"
+    }
+  ],
   "reservoirs": [
     {
       "id": "res-0001",

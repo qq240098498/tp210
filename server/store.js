@@ -16,10 +16,19 @@ const DEFAULT_SETTINGS = {
   inflowSeriousFlow: 260,
 };
 
+// 联合调度总控约束的默认值（流量单位 m³/s，按日考核）
+const DEFAULT_JOINT_CONTROL = {
+  maxTotalReleaseFlow: 150,
+  sectionName: '白河下游控制断面',
+  sectionMinFlow: 50,
+  sectionMaxFlow: 140,
+};
+
 function normalize(raw) {
   const data = raw && typeof raw === 'object' ? raw : {};
   data.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings || {});
-  for (const key of ['reservoirs', 'curves', 'levels', 'inflows', 'releases', 'orders']) {
+  data.jointControl = Object.assign({}, DEFAULT_JOINT_CONTROL, data.jointControl || {});
+  for (const key of ['reservoirs', 'curves', 'levels', 'inflows', 'releases', 'orders', 'links']) {
     if (!Array.isArray(data[key])) data[key] = [];
   }
   return data;
@@ -76,4 +85,13 @@ function daysBetween(from, to) {
   return Math.round((end - start) / 86400000);
 }
 
-module.exports = { load, save, nextId, normalize, todayIso, round, daysBetween, DEFAULT_SETTINGS, dataFile };
+// 日期加减天数，返回 年-月-日
+function addDays(dateStr, n) {
+  const parts = String(dateStr || '').split('-').map(Number);
+  if (parts.length !== 3 || parts.some((x) => !Number.isFinite(x))) return '';
+  const d = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  d.setUTCDate(d.getUTCDate() + Number(n || 0));
+  return d.toISOString().slice(0, 10);
+}
+
+module.exports = { load, save, nextId, normalize, todayIso, round, daysBetween, addDays, DEFAULT_SETTINGS, DEFAULT_JOINT_CONTROL, dataFile };

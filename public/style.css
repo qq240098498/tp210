@@ -295,6 +295,7 @@ code {
 }
 .table tr.is-expanded > td { background: var(--indigo-soft); }
 .table tr.is-invalid > td { background: #fdeee7; }
+.table tr.is-exceeded > td { background: #fdeee7; }
 
 .empty { color: var(--ink-soft); font-size: 13px; margin: 6px 0; }
 

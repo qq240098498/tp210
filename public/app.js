@@ -6,7 +6,7 @@
 
   /* ================= 常量与工具 ================= */
 
-  var VIEW_IDS = ['overview', 'reservoirs', 'water', 'orders', 'balance'];
+  var VIEW_IDS = ['overview', 'reservoirs', 'water', 'orders', 'balance', 'joint'];
   var ORDER_STATUSES = ['已下达', '执行中', '已完成', '已撤销'];
   var RESERVOIR_STATUSES = ['运行', '检修'];
 
@@ -128,7 +128,8 @@
     flows: { inflow: [], release: [] },
     orders: [],
     balance: null,
-    expanded: { reservoir: '', level: '', flow: '', order: '' },
+    joint: { overview: null, plan: null },
+    expanded: { reservoir: '', level: '', flow: '', order: '', link: '' },
     reservoirDetail: null,
     curveDraft: null,
     curveQuery: { reservoirId: '', byLevel: null, byCapacity: null },
@@ -137,7 +138,8 @@
       reservoirs: { basin: '', status: '', keyword: '' },
       water: { reservoirId: '', from: '', to: '' },
       orders: { reservoirId: '', status: '' },
-      balance: { reservoirId: '', from: '2026-05-01', to: '2026-05-10' }
+      balance: { reservoirId: '', from: '2026-05-01', to: '2026-05-10' },
+      joint: { from: '', to: '' }
     }
   };
 
@@ -245,6 +247,11 @@
         renderOrders();
       } else if (view === 'balance') {
         renderBalance();
+      } else if (view === 'joint') {
+        state.joint.overview = await api('GET', '/api/joint/overview');
+        fillJointDefaults();
+        renderJoint();
+        if (state.filters.joint.from && state.filters.joint.to) await submitJointPlanQuery();
       }
     } catch (err) {
       showError(err);
@@ -372,6 +379,22 @@
       html.push('<li>每天损失 ' + esc(dash(state.settings ? state.settings.lossPerDayWan : '')) + ' 万m³</li>');
       html.push('<li>容差 ' + esc(dash(state.settings ? state.settings.balanceToleranceWan : '')) + ' 万m³</li>');
       html.push('<li>汛期 ' + esc(dash(state.settings ? state.settings.floodSeasonStart + ' 至 ' + state.settings.floodSeasonEnd : '')) + '</li>');
+      html.push('</ul></div>');
+    } else if (view === 'joint') {
+      var jc = state.joint.overview ? state.joint.overview.control : null;
+      html.push('<div class="side-block">');
+      html.push('<h3>联合调度口径</h3><ul class="side-list">');
+      html.push('<li>传递量 = 上游当日出库 × 传递比例，传递时长天后到达下游入库</li>');
+      html.push('<li>合计出库 = 联合体各库当日出库流量之和</li>');
+      html.push('<li>合计水量按每天 86400 秒折算万m³</li>');
+      html.push('<li>余量 = 总出库上限 − 当日合计出库</li>');
+      html.push('<li>登记出库超上限会被接口拦下</li>');
+      html.push('<li>断面不满足只在页面标出，不拦截</li>');
+      html.push('</ul></div>');
+      html.push('<div class="side-block"><h3>当前总控约束</h3><ul class="side-list">');
+      html.push('<li>总出库上限 ' + esc(dash(jc ? jc.maxTotalReleaseFlow : '')) + ' m³/s</li>');
+      html.push('<li>断面 ' + esc(dash(jc ? jc.sectionName : '')) + '</li>');
+      html.push('<li>断面要求 ' + esc(dash(jc ? jc.sectionMinFlow : '')) + ' ~ ' + esc(dash(jc ? jc.sectionMaxFlow : '')) + ' m³/s</li>');
       html.push('</ul></div>');
     }
 
@@ -827,6 +850,241 @@
       + '</ul>';
   }
 
+  /* ================= 联合调度 ================= */
+
+  function addDaysIso(iso, n) {
+    var parts = String(iso || '').split('-').map(Number);
+    if (parts.length !== 3 || parts.some(function (x) { return !Number.isFinite(x); })) return '';
+    var d = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+
+  /* 默认时段：围绕「当前合计出库」所在日期前后各几天，让调度表一打开就有内容 */
+  function fillJointDefaults() {
+    var f = state.filters.joint;
+    var current = state.joint.overview && state.joint.overview.current;
+    var anchor = current && current.date ? current.date : todayIso();
+    if (!f.from) f.from = addDaysIso(anchor, -6);
+    if (!f.to) f.to = addDaysIso(anchor, 1);
+    var fromInput = el('jointPlanFrom');
+    if (fromInput) fromInput.value = f.from;
+    var toInput = el('jointPlanTo');
+    if (toInput) toInput.value = f.to;
+  }
+
+  function renderJoint() {
+    renderJointCards();
+    renderJointLinks();
+    fillJointControlForm();
+    renderJointPlan();
+  }
+
+  function renderJointCards() {
+    var box = el('jointCards');
+    var ov = state.joint.overview;
+    if (!ov) {
+      box.innerHTML = '<p class="empty">指标还在加载…</p>';
+      return;
+    }
+    var c = ov.current || {};
+    var control = ov.control || {};
+    var section = c.section || {};
+    box.innerHTML = [
+      metricCard('当前合计出库', numText(c.totalFlow) + ' m³/s', '日期 ' + dash(c.date) + '（最近有出库记录的一天）', 'joint', ''),
+      metricCard('总出库上限', numText(control.maxTotalReleaseFlow) + ' m³/s', '两库合计每日不得超此值', 'joint', ''),
+      metricCard('离上限余量', numText(c.margin) + ' m³/s', c.exceeded ? '已超出上限' : '余量 = 上限 − 当前合计', 'joint', '', !!c.exceeded),
+      metricCard('断面要求', numText(control.sectionMinFlow) + ' ~ ' + numText(control.sectionMaxFlow), dash(control.sectionName) + '：' + dash(section.state), 'joint', '', section.ok === false)
+    ].join('');
+  }
+
+  function renderJointLinks() {
+    var ov = state.joint.overview;
+    var tbody = el('linkRows');
+    var colspan = columnCount('linkRows');
+    var links = ov ? (ov.links || []) : [];
+    if (!links.length) {
+      tbody.innerHTML = emptyRow(colspan, ov ? '还没有登记上下游关系，先在上面登记一条。' : '数据还在加载…');
+      return;
+    }
+    var html = [];
+    links.forEach(function (link) {
+      var expanded = state.expanded.link === link.id;
+      html.push('<tr class="link-row' + (expanded ? ' is-expanded' : '') + '" data-action="toggle-link" data-id="' + esc(link.id) + '">'
+        + '<td>' + esc(dash(link.upstreamName)) + '</td>'
+        + '<td>' + esc(dash(link.downstreamName)) + '</td>'
+        + '<td class="num">' + esc(numText(link.lagDays)) + '</td>'
+        + '<td class="num">' + esc(numText(link.ratio)) + '</td>'
+        + '<td>' + esc(dash(link.remark)) + '</td>'
+        + '<td><span class="tag">展开</span></td>'
+        + '</tr>');
+      if (expanded) {
+        html.push('<tr class="detail-row" data-detail-for="' + esc(link.id) + '"><td colspan="' + colspan + '"><div class="detail" data-link-id="' + esc(link.id) + '">'
+          + '<div class="detail-grid">'
+          + itemHtml(['关系编号', link.id])
+          + itemHtml(['传递口径', '上游当日出库 × ' + numText(link.ratio) + '，' + numText(link.lagDays) + ' 天后到达下游入库'])
+          + itemHtml(['备注', link.remark])
+          + '</div>'
+          + '<h4>修改这条关系 <span class="card-sub">接口 <code>PATCH /api/joint/links/:id</code></span></h4>'
+          + '<div class="inline-form">'
+          + '<label class="field"><span>传递时长（天）</span><input type="number" step="1" min="0" data-link-field="lagDays" value="' + esc(link.lagDays) + '" /></label>'
+          + '<label class="field"><span>传递比例（0~1）</span><input type="number" step="0.05" min="0" max="1" data-link-field="ratio" value="' + esc(link.ratio) + '" /></label>'
+          + '<label class="field"><span>备注</span><input type="text" data-link-field="remark" value="' + esc(link.remark || '') + '" /></label>'
+          + '<button type="button" class="btn btn-primary btn-sm" data-action="save-link" data-id="' + esc(link.id) + '">保存修改</button>'
+          + '</div>'
+          + '<div class="detail-actions">'
+          + '<button type="button" class="btn btn-sm" data-action="delete-link" data-id="' + esc(link.id) + '">删除这条关系</button>'
+          + '</div>'
+          + '<div class="form-error" data-role="link-error" hidden></div>'
+          + '</div></td></tr>');
+      }
+    });
+    tbody.innerHTML = html.join('');
+  }
+
+  function fillJointControlForm() {
+    var ov = state.joint.overview;
+    if (!ov || !ov.control) return;
+    var c = ov.control;
+    var map = { jointControlCap: c.maxTotalReleaseFlow, jointControlSectionName: c.sectionName, jointControlMin: c.sectionMinFlow, jointControlMax: c.sectionMaxFlow };
+    Object.keys(map).forEach(function (id) {
+      var node = el(id);
+      if (node) node.value = map[id];
+    });
+  }
+
+  function transferCellHtml(list, dateKey, dateLabel) {
+    var lines = (list || []).filter(function (t) { return Number(t.flow) > 0; }).map(function (t) {
+      return esc(t.upstreamName) + '→' + esc(t.downstreamName) + ' <b>' + esc(numText(t.flow)) + '</b> m³/s'
+        + '（' + esc(numText(t.volumeWan)) + ' 万m³，' + esc(t[dateKey]) + ' ' + esc(dateLabel) + '）';
+    });
+    return lines.length ? lines.join('<br />') : '—';
+  }
+
+  function jointStatusTag(day) {
+    if (day.status === '超出上限') return '<span class="tag is-over">超出上限</span>';
+    if (day.status === '正常') return '<span class="tag is-ok">正常</span>';
+    return '<span class="tag is-warn">' + esc(day.status) + '</span>';
+  }
+
+  function renderJointPlan() {
+    var box = el('jointPlanResult');
+    var plan = state.joint.plan;
+    if (!plan) {
+      box.innerHTML = '<p class="empty">先选起止日期，再点「生成调度表」。</p>';
+      return;
+    }
+    var members = plan.members || [];
+    var control = plan.control || {};
+    var head = '<tr><th>日期</th>'
+      + members.map(function (m) { return '<th class="num">' + esc(m.name) + '出库</th>'; }).join('')
+      + '<th class="num">合计出库（m³/s）</th>'
+      + '<th class="num">合计水量（万m³）</th>'
+      + '<th>当日到达下游的传递量</th>'
+      + '<th>当日上游发出的传递量</th>'
+      + '<th class="num">余量（m³/s）</th>'
+      + '<th>断面要求</th>'
+      + '<th>状态</th></tr>';
+    var rows = plan.days.map(function (d) {
+      var cells = '<td>' + esc(d.date) + '</td>';
+      members.forEach(function (m) {
+        cells += '<td class="num">' + esc(numText(d.releases[m.id])) + '</td>';
+      });
+      cells += '<td class="num"><b>' + esc(numText(d.totalFlow)) + '</b></td>';
+      cells += '<td class="num">' + esc(numText(d.totalVolumeWan)) + '</td>';
+      cells += '<td>' + transferCellHtml(d.transferIn, 'releaseDate', '出库') + '</td>';
+      cells += '<td>' + transferCellHtml(d.transferOut, 'arriveDate', '到达') + '</td>';
+      cells += '<td class="num">' + (d.exceeded ? '<span class="tag is-over">' + esc(numText(d.margin)) + '</span>' : esc(numText(d.margin))) + '</td>';
+      cells += '<td>' + esc(numText(control.sectionMinFlow)) + ' ~ ' + esc(numText(control.sectionMaxFlow)) + '</td>';
+      cells += '<td>' + jointStatusTag(d) + '</td>';
+      return '<tr' + (d.exceeded ? ' class="is-exceeded"' : '') + '>' + cells + '</tr>';
+    }).join('');
+    if (!rows) rows = emptyRow(6 + members.length, '这个时段没有天数。');
+
+    var s = plan.summary || {};
+    box.innerHTML = '<div class="result-grid">'
+      + resultItem('当前合计出库（m³/s）', plan.days.length ? plan.days[plan.days.length - 1].totalFlow : '—')
+      + resultItem('总出库上限（m³/s）', control.maxTotalReleaseFlow)
+      + resultItem('时段合计出库水量（万m³）', s.totalVolumeWan)
+      + resultItem('日均合计出库（m³/s）', s.meanTotalFlow)
+      + resultItem('超出上限天数', s.exceededDays, Number(s.exceededDays) > 0)
+      + resultItem('断面不满足天数', s.sectionBadDays, Number(s.sectionBadDays) > 0)
+      + '</div>'
+      + '<div class="table-wrap"><table class="table"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
+      + '<h4>口径（一行行写出来，数字全部取接口字段）</h4>'
+      + '<ul class="caliber">'
+      + '<li>传递量：上游当日出库流量 × 传递比例，<b>传递时长</b>天后到达下游入库；「当日到达」看 lag 天前的上游出库，「当日发出」看本日上游出库并注明到达日期。传递水量按每天 <b>86400</b> 秒折算万m³。</li>'
+      + '<li>合计出库：联合体各库当日出库流量之和；合计水量 = 合计出库流量 × 86400 ÷ 10000（万m³）。</li>'
+      + '<li>余量 = 总出库上限 <b>' + esc(numText(control.maxTotalReleaseFlow)) + '</b> − 当日合计出库；余量为负即超出上限，整行标红。</li>'
+      + '<li>断面流量按两库合计出库流量考核，应在 <b>' + esc(numText(control.sectionMinFlow)) + ' ~ ' + esc(numText(control.sectionMaxFlow)) + '</b> m³/s（' + esc(dash(control.sectionName)) + '）之间；不满足只在状态列标出，不拦截。</li>'
+      + '<li>登记出库流量时若当日合计会超过总出库上限，接口直接拦下（<code>JOINT_LIMIT_EXCEEDED</code>）并点名是哪一天、哪一座库。</li>'
+      + '</ul>';
+  }
+
+  async function submitJointPlanQuery() {
+    var f = state.filters.joint;
+    state.joint.plan = await api('GET', '/api/joint/plan' + queryString({ from: f.from, to: f.to }));
+    renderJointPlan();
+  }
+
+  async function submitJointPlan(form) {
+    var errorBox = el('jointPlanError');
+    clearFormError(errorBox);
+    var values = formValues(form);
+    state.filters.joint = { from: values.from, to: values.to };
+    if (!values.from || !values.to) {
+      showNotice('请先给出起止日期', true);
+      return;
+    }
+    try {
+      await submitJointPlanQuery();
+      toast('调度表已按接口返回的字段生成');
+    } catch (err) {
+      state.joint.plan = null;
+      renderJointPlan();
+      showError(err, errorBox);
+    }
+  }
+
+  async function submitLink(form) {
+    var errorBox = el('linkFormError');
+    clearFormError(errorBox);
+    var values = formValues(form);
+    try {
+      await api('POST', '/api/joint/links', {
+        upstreamId: values.upstreamId,
+        downstreamId: values.downstreamId,
+        lagDays: Number(values.lagDays),
+        ratio: Number(values.ratio),
+        remark: values.remark
+      });
+      toast('上下游关系已登记');
+      form.reset();
+      await reloadView('joint');
+    } catch (err) {
+      showError(err, errorBox);
+    }
+  }
+
+  async function submitJointControl(form) {
+    var errorBox = el('jointControlError');
+    clearFormError(errorBox);
+    var values = formValues(form);
+    try {
+      await api('PUT', '/api/joint/control', {
+        maxTotalReleaseFlow: Number(values.maxTotalReleaseFlow),
+        sectionName: values.sectionName,
+        sectionMinFlow: Number(values.sectionMinFlow),
+        sectionMaxFlow: Number(values.sectionMaxFlow)
+      });
+      toast('总控约束已保存');
+      await reloadView('joint');
+      renderSidebar();
+    } catch (err) {
+      showError(err, errorBox);
+    }
+  }
+
   /* ================= 设置弹层 ================= */
 
   function openSettingsModal() {
@@ -1039,6 +1297,7 @@
     if (type === 'level') state.expanded.level = state.expanded.level === id ? '' : id;
     if (type === 'order') state.expanded.order = state.expanded.order === id ? '' : id;
     if (type === 'flow') state.expanded.flow = state.expanded.flow === id ? '' : id;
+    if (type === 'link') state.expanded.link = state.expanded.link === id ? '' : id;
   }
 
   /* ================= 事件委托 ================= */
@@ -1062,6 +1321,33 @@
     if (action === 'toggle-level') { toggleRow('level', btn.dataset.id); renderWater(); return; }
     if (action === 'toggle-flow') { toggleRow('flow', btn.dataset.kind + ':' + btn.dataset.id); renderWater(); return; }
     if (action === 'toggle-order') { toggleRow('order', btn.dataset.id); renderOrders(); return; }
+    if (action === 'toggle-link') { toggleRow('link', btn.dataset.id); renderJointLinks(); return; }
+
+    if (action === 'save-link') {
+      var linkBox = btn.closest('.detail');
+      var linkBody = {};
+      qsa('[data-link-field]', linkBox).forEach(function (node) {
+        var field = node.dataset.linkField;
+        if (field === 'lagDays' || field === 'ratio') linkBody[field] = Number(node.value);
+        else linkBody[field] = node.value;
+      });
+      try {
+        await api('PATCH', '/api/joint/links/' + encodeURIComponent(btn.dataset.id), linkBody);
+        toast('上下游关系已更新');
+        await reloadView('joint');
+      } catch (err) { showError(err, qs('[data-role="link-error"]', linkBox)); }
+      return;
+    }
+    if (action === 'delete-link') {
+      if (!armDelete(btn)) return;
+      try {
+        await api('DELETE', '/api/joint/links/' + encodeURIComponent(btn.dataset.id));
+        state.expanded.link = '';
+        toast('上下游关系已删除');
+        await reloadView('joint');
+      } catch (err) { showError(err); }
+      return;
+    }
 
     if (action === 'delete-level') {
       if (!armDelete(btn)) return;
@@ -1228,6 +1514,7 @@
       if (row.classList.contains('level-row')) { toggleRow('level', row.dataset.id); renderWater(); return; }
       if (row.classList.contains('flow-row')) { toggleRow('flow', row.dataset.kind + ':' + row.dataset.id); renderWater(); return; }
       if (row.classList.contains('order-row')) { toggleRow('order', row.dataset.id); renderOrders(); return; }
+      if (row.classList.contains('link-row')) { toggleRow('link', row.dataset.id); renderJointLinks(); return; }
     });
 
     document.addEventListener('change', function (event) {
@@ -1269,20 +1556,26 @@
     el('releaseForm').addEventListener('submit', function (event) { event.preventDefault(); submitFlow(event.target, 'release'); });
     el('orderForm').addEventListener('submit', function (event) { event.preventDefault(); submitOrder(event.target); });
     el('balanceForm').addEventListener('submit', function (event) { event.preventDefault(); submitBalance(event.target); });
+    el('linkForm').addEventListener('submit', function (event) { event.preventDefault(); submitLink(event.target); });
+    el('jointControlForm').addEventListener('submit', function (event) { event.preventDefault(); submitJointControl(event.target); });
+    el('jointPlanForm').addEventListener('submit', function (event) { event.preventDefault(); submitJointPlan(event.target); });
   }
 
   /* ================= 下拉与默认值 ================= */
 
   function fillReservoirSelects() {
     var list = state.reservoirs || [];
-    ['levelFormReservoir', 'inflowFormReservoir', 'releaseFormReservoir', 'orderFormReservoir', 'balanceReservoir'].forEach(function (id) {
+    ['levelFormReservoir', 'inflowFormReservoir', 'releaseFormReservoir', 'orderFormReservoir', 'balanceReservoir', 'linkFormUpstream', 'linkFormDownstream'].forEach(function (id) {
       var node = el(id);
       if (!node) return;
       var current = node.value;
+      /* 下游默认落到第二座库，避免上下游默认成同一座 */
+      var fallback = list[0] ? list[0].id : '';
+      if (id === 'linkFormDownstream' && list.length > 1) fallback = list[1].id;
       node.innerHTML = optionsHtml(list.map(function (r) {
         return { value: r.id, label: r.code + ' ' + r.name };
-      }), current || (list[0] ? list[0].id : ''), '请选择水库');
-      if (!node.value && list.length) node.value = list[0].id;
+      }), current || fallback, '请选择水库');
+      if (!node.value && list.length) node.value = fallback;
     });
     var levelDate = el('levelFormDate');
     if (levelDate && !levelDate.value) levelDate.value = todayIso();
@@ -1330,6 +1623,9 @@
       state.flows.inflow = await api('GET', '/api/flows?kind=inflow');
       state.flows.release = await api('GET', '/api/flows?kind=release');
       state.orders = await api('GET', '/api/orders');
+      state.joint.overview = await api('GET', '/api/joint/overview');
+      fillJointDefaults();
+      await submitJointPlanQuery();
     } catch (err) {
       showError(err);
     }
@@ -1342,6 +1638,7 @@
     renderWater();
     renderOrders();
     renderBalance();
+    renderJoint();
   }
 
   if (document.readyState === 'loading') {

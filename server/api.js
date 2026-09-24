@@ -5,6 +5,7 @@ const reservoirs = require('./reservoirs');
 const records = require('./records');
 const water = require('./water');
 const summary = require('./summary');
+const joint = require('./joint');
 
 const router = express.Router();
 
@@ -67,6 +68,15 @@ router.get('/balance', withData((data, req) => {
   if (!result) throw new AppError(404, 'BALANCE_UNAVAILABLE', '这个水库还没有水位-库容曲线，算不了');
   return result;
 }));
+
+router.get('/joint/overview', withData((data) => joint.overview(data)));
+router.get('/joint/plan', withData((data, req) => joint.plan(data, req.query.from, req.query.to)));
+router.get('/joint/links', withData((data) => joint.listLinks(data)));
+router.post('/joint/links', withData((data, req) => ({ __save: true, __body: joint.createLink(data, req.body || {}) })));
+router.patch('/joint/links/:id', withData((data, req) => ({ __save: true, __body: joint.updateLink(data, req.params.id, req.body || {}) })));
+router.delete('/joint/links/:id', withData((data, req) => ({ __save: true, __body: joint.removeLink(data, req.params.id) })));
+router.get('/joint/control', withData((data) => joint.controlOf(data)));
+router.put('/joint/control', withData((data, req) => ({ __save: true, __body: joint.saveControl(data, req.body || {}) })));
 
 router.get('/curve/query', withData((data, req) => {
   const { reservoirId, level, capacity } = req.query;

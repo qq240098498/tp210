@@ -2,6 +2,7 @@ const { AppError } = require('./errors');
 const store = require('./store');
 const water = require('./water');
 const reservoirs = require('./reservoirs');
+const joint = require('./joint');
 
 // 水位记录
 function listLevels(data, query) {
@@ -89,6 +90,7 @@ function saveFlow(data, kind, payload) {
   const flow = Number(payload.flow);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new AppError(400, 'VALIDATION_FAILED', '日期要按 年-月-日 填', { date: '日期格式不对' });
   if (!Number.isFinite(flow) || flow < 0) throw new AppError(400, 'VALIDATION_FAILED', '流量要填非负数字', { flow: '流量不对' });
+  if (kind === 'release') joint.checkRelease(data, reservoir.id, date, flow);
   const list = kind === 'inflow' ? data.inflows : data.releases;
   const record = {
     id: store.nextId(kind === 'inflow' ? 'in' : 'out', list),
